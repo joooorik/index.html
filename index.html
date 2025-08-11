@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HandDraw — Camera Hand-Tracking Canvas (v2)</title>
+  <style>
+    :root { --bg:#0b0f14; --panel:#121821; --muted:#8ea0b3; --text:#e8eef6; --accent:#5dd6ff; --danger:#ff6b6b; }
+    html,body{height:100%}
+    body{margin:0;background:radial-gradient(1200px 600px at 20% -10%,#14202e,var(--bg));color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial;overflow:hidden}
+    .app{position:relative;display:grid;grid-template-rows:auto 1fr auto;height:100%}
+    header{display:flex;gap:12px;align-items:center;padding:12px 16px;background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,0));border-bottom:1px solid rgba(255,255,255,.06);backdrop-filter:blur(8px)}
+    header h1{font-size:16px;margin:0;font-weight:600}
+    header .status{font-size:12px;color:var(--muted)}
+    .stage{position:relative;height:100%}
+    canvas#draw{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:crosshair}
+    video#camera,canvas#debug{position:absolute;top:12px;right:12px;width:240px;height:180px;border-radius:14px;background:#000;object-fit:cover;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    canvas#debug{pointer-events:none;opacity:.9}
+    .toolbar{position:absolute;left:16px;top:16px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px;border-radius:14px;background:rgba(10,16,23,.7);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.06)}
+    .btn{appearance:none;border:1px solid rgba(255,255,255,.08);background:var(--panel);color:var(--text);padding:8px 10px;border-radius:12px;cursor:pointer;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.35)}
+    .swatch{width:26px;height:26px;border-radius:999px;border:1px solid rgba(255,255,255,.2);cursor:pointer;box-shadow:inset 0 0 0 2px rgba(255,255,255,.06),0 2px 8px rgba(0,0,0,.35)}
+    .legend{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;font-size:12px;color:var(--muted);background:rgba(10,16,23,.6);padding:8px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.06)}
+    .overlay{position:absolute;inset:0;display:grid;place-items:center;background:linear-gradient(180deg,rgba(6,10,16,.6),rgba(6,10,16,.85));z-index:5}
+    .card{background:rgba(12,18,26,.9);border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:18px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+    select, .input{background:#0e1520;border:1px solid rgba(255,255,255,.12);color:var(--text);padding:8px 10px;border-radius:10px}
+    .warn{color:var(--danger);font-size:12px;margin-top:6px}
+    .hidden{display:none!important}
+  </style>
+  <script type="module">
+    import { HandLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.7/vision_bundle_mjs.js";
+
+    const els = {};
+    const state = {
+      handLandmarker:null, running:false, drawing:false, erasing:false,
+      pinchActive:false, lastPoint:null, brushColor:'#ffffff', brushSize:6,
+      strokes:[], currentStroke:null, smoothing:0.35, smoothed:{x:null,y:null},
+      videoSize:{w:640,h:480}, canvasSize:{w:0,h:0}, showDebug:true,
+      stream:null, deviceId:null
+    };
+
+    const $ = (q)=>document.querySelector(q);
+
+    function fitCanvasToContainer(c){
+      const r=c.getBoundingClientRect(); const dpr=Math.max(1, devicePixelRatio||1);
+      c.width=Math.floor(r.width*dpr); c.height=Math.floor(r.height*dpr);
+      const ctx=c.getContext('2d'); ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr);
+      state.canvasSize={w:r.width,h:r.height};
+    }
+    function updateStatus(t){ els.status.textContent=t; }
+
+    async function enumerateCameras(){
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const vids = devices.filter(d=>d.kind==='videoinput');
+        els.devices.innerHTML='';
+        vids.forEach(v=>{
+          const opt=document.createElement('option');
+          opt.value=v.deviceId; opt.textContent=v.label||`Camera ${els.devices.length+1}`;
+          els.devices.appendChild(opt);
+        });
+        if (vids.length>0 && !state.deviceId){ state.deviceId = vids[0].deviceId; }
+      } catch(e){ console.warn('enumerateDevices failed', e); }
+    }
+
+    async function setupCamera(){
+      if (!navigator.mediaDevices?.getUserMedia){ throw new Error('getUserMedia not supported'); }
+      const constraints = { video: { deviceId: state.deviceId? { exact: state.deviceId }: undefined, facingMode:'user', width:{ideal:1280}, height:{ideal:720} }, audio:false };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      state.stream = stream;
+      els.video.srcObject = stream;
+      await els.video.play();
+      const settings = stream.getVideoTracks()[0].getSettings();
+      state.videoSize = { w: settings.width||640, h: settings.height||480 };
+      updateStatus('Camera ready');
+    }
+
+    async function setupHandLandmarker(){
+      const filesetResolver = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.7/wasm");
+      state.handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: { modelAssetPath: "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.7/wasm/hand_landmarker.task", delegate:'GPU' },
+        numHands:1, runningMode:'VIDEO'
+      });
+      updateStatus('Hand model loaded');
+    }
+
+    function indexTip(lm){ return lm[8]; }
+    function thumbTip(lm){ return lm[4]; }
+    function dist(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return Math.hypot(dx,dy); }
+    function lowpass(prev,curr,a){ return prev==null? curr : prev + (curr-prev)*a; }
+
+    function pxFromNorm(pt){
+      const v=state.videoSize, c=state.canvasSize; const va=v.w/v.h, ca=c.w/c.h;
+      let W,H,ox,oy; if (va>ca){ W=c.w; H=c.w/va; ox=0; oy=(c.h-H)/2; } else { H=c.h; W=c.h*va; oy=0; ox=(c.w-W)/2; }
+      return { x: ox + pt.x*W, y: oy + pt.y*H };
+    }
+
+    function startStroke(x,y){ const ctx=els.draw.getContext('2d'); ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle=state.erasing? '#000':'#fff'; ctx.globalCompositeOperation=state.erasing? 'destination-out':'source-over'; ctx.lineWidth=state.brushSize; state.currentStroke={points:[{x,y}], color:state.brushColor, size:state.brushSize, erase:state.erasing}; }
+    function extendStroke(x,y){ const ctx=els.draw.getContext('2d'); const pts=state.currentStroke.points; const last=pts[pts.length-1]; ctx.beginPath(); ctx.moveTo(last.x,last.y); ctx.lineTo(x,y); ctx.strokeStyle=state.erasing? '#000':state.brushColor; ctx.globalCompositeOperation=state.erasing? 'destination-out':'source-over'; ctx.lineWidth=state.brushSize; ctx.stroke(); pts.push({x,y}); }
+    function endStroke(){ if (state.currentStroke && state.currentStroke.points.length>1){ state.strokes.push(state.currentStroke); } state.currentStroke=null; }
+    function undo(){ if(!state.strokes.length) return; state.strokes.pop(); redraw(); }
+    function clearCanvas(){ const ctx=els.draw.getContext('2d'); ctx.clearRect(0,0,els.draw.width,els.draw.height); state.strokes=[]; }
+    function redraw(){ const ctx=els.draw.getContext('2d'); const r=els.draw.getBoundingClientRect(); const dpr=Math.max(1,devicePixelRatio||1); ctx.setTransform(1,0,0,1,0,0); els.draw.width=Math.floor(r.width*dpr); els.draw.height=Math.floor(r.height*dpr); ctx.scale(dpr,dpr); ctx.clearRect(0,0,r.width,r.height); for(const s of state.strokes){ ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle=s.erase? '#000':s.color; ctx.globalCompositeOperation=s.erase? 'destination-out':'source-over'; ctx.lineWidth=s.size; for(let i=1;i<s.points.length;i++){ const a=s.points[i-1], b=s.points[i]; ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); } } }
+
+    function fingersExtended(lm){ const ids={thumb:[4,3], index:[8,6], middle:[12,10], ring:[16,14], pinky:[20,18]}; const ext={}; ext.index = lm[ids.index[0]].y < lm[ids.index[1]].y; ext.middle = lm[ids.middle[0]].y < lm[ids.middle[1]].y; ext.ring = lm[ids.ring[0]].y < lm[ids.ring[1]].y; ext.pinky = lm[ids.pinky[0]].y < lm[ids.pinky[1]].y; ext.thumb = (lm[ids.thumb[0]].x < lm[ids.thumb[1]].x); return ext; }
+    function detectGestures(lm){ const tip=indexTip(lm), th=thumbTip(lm); const pinch=dist(tip,th)<0.05; const ext=fingersExtended(lm); const openPalm=ext.index&&ext.middle&&ext.ring&&ext.pinky&&ext.thumb; const fist=!ext.index&&!ext.middle&&!ext.ring&&!ext.pinky&&!ext.thumb; const twoFinger=ext.index&&ext.middle&&!ext.ring&&!ext.pinky; return {pinch,openPalm,fist,twoFinger}; }
+
+    function drawDebug(res){ const ctx=els.debug.getContext('2d'); ctx.clearRect(0,0,els.debug.width,els.debug.height); if(!res?.landmarks?.length) return; const lm=res.landmarks[0]; const du=new DrawingUtils(ctx); ctx.save(); ctx.scale(els.debug.width/state.videoSize.w, els.debug.height/state.videoSize.h); du.drawConnectors(lm, HandLandmarker.HAND_CONNECTIONS, { color:'#5dd6ff', lineWidth:3 }); du.drawLandmarks(lm, { color:'#a5ff8b', lineWidth:1 }); ctx.restore(); }
+
+    async function start(){
+      // Pre-checks
+      if (!window.isSecureContext){ els.warn.textContent = 'This page must be served over HTTPS (or http://localhost) for camera access.'; els.warn.classList.remove('hidden'); return; }
+      els.warn.classList.add('hidden');
+      els.startBtn.disabled=true; els.startBtn.textContent='Requesting camera…';
+      try {
+        await setupCamera();
+        await setupHandLandmarker();
+        els.overlay.classList.add('hidden');
+        updateStatus('Raise your hand ✋ — pinch to draw');
+        loop();
+      } catch (e){
+        console.error(e);
+        let msg = e?.message || String(e);
+        if (msg.includes('permission') || msg.includes('denied')){
+          msg = 'Camera permission denied. Please allow access in your browser settings and reload.';
+        }
+        els.warn.textContent = msg; els.warn.classList.remove('hidden');
+        els.startBtn.disabled=false; els.startBtn.textContent='Enable Camera';
+      }
+      await enumerateCameras();
+    }
+
+    function loop(){
+      const step=()=>{
+        if (!state.handLandmarker){ return requestAnimationFrame(step); }
+        const ts = performance.now();
+        const res = state.handLandmarker.detectForVideo(els.video, ts);
+        drawDebug(res);
+        if (res?.landmarks?.length){
+          const lm=res.landmarks[0];
+          const g=detectGestures(lm);
+          let p=pxFromNorm(indexTip(lm));
+          state.smoothed.x=lowpass(state.smoothed.x,p.x,state.smoothing);
+          state.smoothed.y=lowpass(state.smoothed.y,p.y,state.smoothing);
+          p={x:state.smoothed.x,y:state.smoothed.y};
+          if (g.openPalm){ els.toolbar.classList.remove('hidden'); }
+          if (g.fist){ els.toolbar.classList.add('hidden'); }
+          if (g.twoFinger){ if(!state.pinchActive){ undo(); } state.pinchActive=true; }
+          else if (g.pinch){ if(!state.pinchActive){ startStroke(p.x,p.y); state.drawing=true; } else { if(state.drawing) extendStroke(p.x,p.y); } state.pinchActive=true; }
+          else { if(state.drawing){ endStroke(); } state.pinchActive=false; state.drawing=false; }
+        } else { if(state.drawing){ endStroke(); } state.pinchActive=false; state.drawing=false; }
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    }
+
+    function bindUI(){
+      els.status=$('#status'); els.video=$('#camera'); els.debug=$('#debug'); els.draw=$('#draw'); els.toolbar=$('#toolbar');
+      els.overlay=$('#overlay'); els.startBtn=$('#start'); els.devices=$('#devices'); els.warn=$('#warn');
+      fitCanvasToContainer(els.draw);
+      addEventListener('resize',()=>{ fitCanvasToContainer(els.draw); redraw(); });
+      $('#clear').addEventListener('click',()=>clearCanvas());
+      $('#undo').addEventListener('click',()=>undo());
+      $('#brushBtn').addEventListener('click',()=>{ state.erasing=false; updateStatus('Brush'); });
+      $('#eraserBtn').addEventListener('click',()=>{ state.erasing=true; updateStatus('Eraser'); });
+      document.querySelectorAll('.swatch').forEach(el=> el.addEventListener('click',()=>{ state.brushColor=el.dataset.color; state.erasing=false; }));
+      $('#size').addEventListener('input',e=>{ state.brushSize=parseInt(e.target.value,10); $('#sizeLabel').textContent=`${state.brushSize}px`; });
+      els.startBtn.addEventListener('click', start);
+      els.devices.addEventListener('change', async (e)=>{ state.deviceId=e.target.value; if (state.stream){ state.stream.getTracks().forEach(t=>t.stop()); } await start(); });
+    }
+
+    addEventListener('DOMContentLoaded', bindUI);
+  </script>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <span style="padding:4px 8px;border-radius:999px;background:rgba(93,214,255,.15);color:var(--accent);border:1px solid rgba(93,214,255,.35);font-size:11px">HandDraw</span>
+      <h1>Hand‑Tracking Canvas</h1>
+      <span id="status" class="status">Click Enable Camera to start</span>
+    </header>
+
+    <div class="stage">
+      <canvas id="draw"></canvas>
+      <video id="camera" autoplay playsinline muted></video>
+      <canvas id="debug" width="640" height="480"></canvas>
+
+      <div id="toolbar" class="toolbar hidden">
+        <button id="brushBtn" class="btn" aria-pressed="true" title="Brush (B)">🖌️ Brush</button>
+        <button id="eraserBtn" class="btn" aria-pressed="false" title="Eraser (E)">🧽 Eraser</button>
+        <button id="undo" class="btn" title="Undo (two‑finger)">↶ Undo</button>
+        <button id="clear" class="btn" title="Clear">🗑️ Clear</button>
+        <div class="row">
+          <div class="swatch" style="background:#ffffff" data-color="#ffffff" title="White"></div>
+          <div class="swatch" style="background:#5dd6ff" data-color="#5dd6ff" title="Cyan"></div>
+          <div class="swatch" style="background:#a5ff8b" data-color="#a5ff8b" title="Lime"></div>
+          <div class="swatch" style="background:#ff6b6b" data-color="#ff6b6b" title="Red"></div>
+          <div class="swatch" style="background:#ffd166" data-color="#ffd166" title="Gold"></div>
+          <div class="swatch" style="background:#b388ff" data-color="#b388ff" title="Purple"></div>
+          <label for="size" style="font-size:12px;color:var(--muted);margin-left:8px">Brush</label>
+          <input id="size" type="range" min="2" max="40" value="6" step="1" />
+          <span id="sizeLabel" style="font-size:12px;color:var(--muted)">6px</span>
+        </div>
+      </div>
+
+      <div class="legend"><strong>Gestures:</strong> Pinch = draw • Two fingers = undo • Fist = hide UI • Open palm = show UI</div>
+
+      <div id="overlay" class="overlay">
+        <div class="card">
+          <h3 style="margin:0 0 8px 0">Enable your camera</h3>
+          <p style="margin:0;color:var(--muted);font-size:14px">Required for hand‑tracking. Works over <strong>HTTPS</strong> or <code>http://localhost</code>. On iOS/Safari, you must tap the button below.</p>
+          <div class="row">
+            <button id="start" class="btn">Enable Camera</button>
+            <select id="devices" title="Camera"></select>
+          </div>
+          <div id="warn" class="warn hidden"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
