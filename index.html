@@ -28,7 +28,7 @@
     .hidden{display:none!important}
   </style>
   <script type="module">
-    import { HandLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.7/vision_bundle_mjs.js";
+    import { HandLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.7/vision_bundle.mjs";
 
     const els = {};
     const state = {
@@ -176,7 +176,7 @@
   <div class="app">
     <header>
       <span style="padding:4px 8px;border-radius:999px;background:rgba(93,214,255,.15);color:var(--accent);border:1px solid rgba(93,214,255,.35);font-size:11px">HandDraw</span>
-      <h1>Hand‑Tracking Canvas</h1>
+      <h1>Hand-Tracking Canvas</h1>
       <span id="status" class="status">Click Enable Camera to start</span>
     </header>
 
@@ -188,7 +188,7 @@
       <div id="toolbar" class="toolbar hidden">
         <button id="brushBtn" class="btn" aria-pressed="true" title="Brush (B)">🖌️ Brush</button>
         <button id="eraserBtn" class="btn" aria-pressed="false" title="Eraser (E)">🧽 Eraser</button>
-        <button id="undo" class="btn" title="Undo (two‑finger)">↶ Undo</button>
+        <button id="undo" class="btn" title="Undo (two-finger)">↶ Undo</button>
         <button id="clear" class="btn" title="Clear">🗑️ Clear</button>
         <div class="row">
           <div class="swatch" style="background:#ffffff" data-color="#ffffff" title="White"></div>
@@ -208,7 +208,7 @@
       <div id="overlay" class="overlay">
         <div class="card">
           <h3 style="margin:0 0 8px 0">Enable your camera</h3>
-          <p style="margin:0;color:var(--muted);font-size:14px">Required for hand‑tracking. Works over <strong>HTTPS</strong> or <code>http://localhost</code>. On iOS/Safari, you must tap the button below.</p>
+          <p style="margin:0;color:var(--muted);font-size:14px">Required for hand-tracking. Works over <strong>HTTPS</strong> or <code>http://localhost</code>. On iOS/Safari, you must tap the button below.</p>
           <div class="row">
             <button id="start" class="btn">Enable Camera</button>
             <select id="devices" title="Camera"></select>
